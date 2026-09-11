@@ -149,5 +149,70 @@ the date and the reason, and the sections above stay as they were committed.
 
 ## 9. Outcome
 
-To be completed after the run, by appending. Empty at commit time, which is
-the point.
+Run executed 2026-09-12 against harness `3f9e5fb`, at the budget declared in
+section 5 and with no deviation from sections 1 to 7. Raw data:
+`results/timing.json`.
+
+```
+run                         rate Hz     p50 us     p99 us   p99.9 us     max us
+driver_only r1              21353.5      39.20     112.80     290.11  140069.70
+composed r1                  1303.1     776.60    1754.33    3874.60  135282.40
+driver_only r2              19654.9      34.80      96.11     284.10  161196.70
+composed r2                  1489.9     671.95    1353.30    3457.52  131610.90
+driver_only r3              22870.4      36.40     123.70     361.10  127086.00
+composed r3                  1398.0     723.50    1489.58    3654.50  141908.30
+```
+
+All three repeats are reported, as declared. None was discarded.
+
+### What the numbers say
+
+**The safety layer costs about 0.64 ms to 0.74 ms per cycle at the median.**
+Composed p50 is 671.95 to 776.60 us against a driver-only p50 of 34.80 to
+39.20 us. That difference is the SENTINEL kernel and Shield doing their
+work, measured rather than asserted, and it is the first time that cost has
+been quantified at all.
+
+**The composed stack sustains 1303 to 1490 Hz on software cost alone.** So
+the kernel is not too slow to sit inside a control loop. At the configured
+125 Hz, a period of 8000 us, even the p99.9 of 3457 to 3875 us fits inside
+the period with room left.
+
+**But the p99.9 already exceeds a 500 Hz deadline.** A 500 Hz period is 2000
+us and the composed p99.9 is 3457 to 3875 us in every repeat. On this
+platform, at 500 Hz, roughly one cycle in a thousand would overrun its
+deadline on software cost alone, before any network is involved.
+
+**And the extreme tail belongs to the platform, not to the kernel.** Max is
+127.09 to 161.20 ms, and it is the same order in the driver-only runs
+(127.09 to 161.20 ms) as in the composed runs (131.61 to 141.91 ms). A
+bare driver doing almost nothing shows the same 100 ms class outliers, so
+they are the operating system descheduling the process, not the safety
+layer. That attribution is only available because both configurations were
+measured; timing the composed stack alone would have made the kernel look
+responsible for them.
+
+### The kit's gate, now that a measurement exists
+
+`ursim_smoke.py` declares "rate >= 480 Hz, p99.9 jitter < 2500 us on a
+laptop". Measured on the platform in section 7, the composed stack passes
+the rate half comfortably and **fails the p99.9 half in all three repeats**,
+at 3457.52, 3654.50 and 3874.60 us against a 2500 us bound.
+
+Per section 6, that is a finding about this platform and it is reported as
+one. The gate is not relaxed to accommodate it, and no gate is adopted here.
+It is worth being precise about what failed: this is the software cost
+against a fake, so the real figure including RTDE can only be worse. A
+Windows host with no real-time scheduling is not a platform on which a 500
+Hz hard deadline should be claimed, and this measurement is the evidence for
+saying so rather than a reason to argue with the bound.
+
+### Still unmeasured
+
+End-to-end RTDE timing, for the reason given in section 2: URSim is
+unreachable on this host. Nothing above describes it. The half of claim (B)
+that requires a controller remains unmeasured and is reported as unmeasured.
+
+## 10. Deviations after the outcome
+
+(none)
