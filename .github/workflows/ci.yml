@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Everything that needs no Docker. This is the job that proves claim (A),
+  # and it runs on both platforms because the driver is written on Windows
+  # and deployed on Linux, and the two disagree about clocks in ways this
+  # programme has already been bitten by (see PROTOCOL.md section 3).
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: test
+        run: python -m pytest -q
+
+  # The timing run is reported, never gated. PROTOCOL.md section 6 refuses to
+  # adopt a threshold nobody measured, so this job publishes a distribution
+  # as an artefact and does not fail on any number in it. If you are tempted
+  # to add a pass/fail rule here, note that tests/test_timing.py asserts the
+  # module contains none, and argue for it in PROTOCOL.md first.
+  timing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: measure
+        run: python -m keystone.timing
+      - uses: actions/upload-artifact@v4
+        with:
+          name: timing-${{ github.sha }}
+          path: results/timing.json
+
+  # URSim needs a Docker daemon. On the machine this repository was written
+  # on the daemon never answered, so the integration test skips there with a
+  # reason. GitHub's ubuntu runners do have Docker, which makes this the one
+  # place the skip might not fire.
+  #
+  # UNVERIFIED: this job has never been observed to pass. It could not be,
+  # because the environment that would run it was unavailable. It is here so
+  # the path exists and is honest about its status, not because it is known
+  # to work. See LIMITATIONS.md.
+  ursim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: report docker status
+        run: python -c "from keystone.ursim import docker_status; s=docker_status(); print(('available: ' if s.available else 'unavailable: ')+s.reason)"
+      - name: ursim tests
+        run: python -m pytest tests/test_ursim.py -q -rs
