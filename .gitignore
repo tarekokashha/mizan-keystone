@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.hypothesis/
+
+# controller scratch
+.superpowers/
+
+# build artefacts
+*.egg-info/
+build/
+dist/
+
+# run artefacts; results are committed deliberately, not incidentally
+results/*.csv
+results/*.json
+!results/.gitkeep
