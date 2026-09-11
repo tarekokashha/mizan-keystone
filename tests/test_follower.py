@@ -96,8 +96,8 @@ def test_satisfies_the_installed_abstract_api():
         follower.get_observation()
     with pytest.raises(DeviceNotConnectedError):
         follower.send_action({"joint_position": [0.0] * 6})
-    assert fake.control.calls == []
-    assert fake.receive.calls == []
+    assert len(fake.control.calls) == 0
+    assert len(fake.receive.calls) == 0
 
 
 def test_config_class_and_name_are_set():
@@ -186,7 +186,7 @@ def test_get_observation_on_a_disconnected_robot_raises_and_reads_nothing():
     with pytest.raises(DeviceNotConnectedError):
         follower.get_observation()
 
-    assert fake.receive.calls == []
+    assert len(fake.receive.calls) == 0
 
 
 def test_send_action_on_a_disconnected_robot_raises_and_reaches_no_servoj():
@@ -195,7 +195,7 @@ def test_send_action_on_a_disconnected_robot_raises_and_reaches_no_servoj():
     with pytest.raises(DeviceNotConnectedError):
         follower.send_action({"joint_position": [0.1] * 6})
 
-    assert fake.control.calls == []
+    assert len(fake.control.calls) == 0
 
 
 def test_send_action_after_disconnect_raises_rather_than_servoing_a_dead_interface():
