@@ -14,7 +14,9 @@ closed loop possible: a servoJ call through .control is visible as motion
 through .receive because both hold a reference to the same _SimClock.
 
 Every call to every method is recorded on that method's own fake, with its
-arguments, in .calls. tests/test_rtde_fake.py's fidelity check compares this
+arguments, in .calls. That history is immutable in both directions: neither
+the caller who made the call nor the reader who inspects it afterwards can
+rewrite what it says. tests/test_rtde_fake.py's fidelity check compares this
 module's method surface against the installed ur_rtde 1.6.5, because a fake
 that drifts from the real interface is worse than no fake: the rest of the
 suite would then pass against a contract that does not exist.
@@ -22,7 +24,9 @@ suite would then pass against a contract that does not exist.
 from __future__ import annotations
 
 import datetime
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -40,27 +44,79 @@ _STEP_RAD_PER_SAMPLE = 0.05
 
 class Call(NamedTuple):
     """One recorded invocation: the method name and the arguments it was
-    called with. args and kwargs are frozen copies (see _freeze below), so
-    mutating a list or array after the call cannot rewrite history.
+    called with.
+
+    args and kwargs are frozen copies (see _freeze below), and the freeze
+    runs in both directions. The caller cannot rewrite history by mutating
+    the list or array it passed in, because the record holds a copy. The
+    reader cannot rewrite history by mutating the copy it is handed back
+    through .calls, because that copy refuses in-place mutation. The second
+    direction is the one that matters for claim (A): a history its reader
+    can edit proves nothing about what was sent.
     """
 
     method: str
     args: tuple[Any, ...]
-    kwargs: dict[str, Any]
+    kwargs: Mapping[str, Any]
+
+
+class _FrozenList(list):
+    """A list that refuses every in-place mutation.
+
+    A tuple would be the obvious immutable container, but the recorded
+    arguments get compared against plain lists by the readers of .calls,
+    and a tuple never compares equal to a list. Subclassing list keeps that
+    value equality (list.__eq__ compares contents, not types) while closing
+    the in-place mutation routes. A determined caller can still reach the
+    storage through the unbound list methods; this guards the accident and
+    the honest mistake, not sabotage.
+    """
+
+    def _refuse(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError(
+            "a recorded Call is immutable: .calls is the evidence base for "
+            "claim (A), not scratch space")
+
+    __setitem__ = _refuse
+    __delitem__ = _refuse
+    __iadd__ = _refuse
+    __imul__ = _refuse
+    append = _refuse
+    clear = _refuse
+    extend = _refuse
+    insert = _refuse
+    pop = _refuse
+    remove = _refuse
+    reverse = _refuse
+    sort = _refuse
 
 
 def _freeze(value: Any) -> Any:
-    """A defensive copy of a value about to go into a Call record.
+    """A frozen copy of a value about to go into a Call record.
 
-    Without this, `control.servoJ(q, ...)` followed by the caller mutating
-    `q` in place would silently rewrite what the fake claims was sent, the
-    same class of defeat keystone.config and sentinel.envelope guard against
-    for their own mutable fields.
+    Two different defeats are closed here, and both are needed.
+
+    Forward: `control.servoJ(q, ...)` followed by the caller mutating `q`
+    in place would silently rewrite what the fake claims was sent, the same
+    class of defeat keystone.config and sentinel.envelope guard against for
+    their own mutable fields. The copy closes that.
+
+    Backward: a reader of .calls mutating the copy the recorder kept would
+    rewrite the record just as effectively, because Call.args is a tuple
+    but the objects inside it held the only copy. A read-only array and a
+    mutation-refusing list close that.
+
+    The ndarray branch is the one that carries the weight: sentinel's
+    kernel emits float64 arrays, so that is the type the recorded history
+    behind claim (A) is actually made of. Pinned by
+    test_servoj_recording_is_immune_to_the_caller_mutating_its_ndarray_afterwards.
     """
     if isinstance(value, np.ndarray):
-        return np.array(value, copy=True)
+        frozen = np.array(value, copy=True)
+        frozen.flags.writeable = False
+        return frozen
     if isinstance(value, list):
-        return list(value)
+        return _FrozenList(_freeze(v) for v in value)
     return value
 
 
@@ -68,11 +124,25 @@ class _CallRecorder:
     """Call-recording behaviour shared by the three fakes."""
 
     def __init__(self) -> None:
-        self.calls: list[Call] = []
+        self._calls: list[Call] = []
+
+    @property
+    def calls(self) -> tuple[Call, ...]:
+        """The recorded history, oldest first.
+
+        A tuple rather than the internal list, so a reader cannot append a
+        call that never happened or drop one that did. The Call records
+        inside it are frozen too (see _freeze), so the history is immutable
+        all the way down.
+        """
+        return tuple(self._calls)
 
     def _record(self, method: str, *args: Any, **kwargs: Any) -> None:
-        self.calls.append(Call(method, tuple(_freeze(a) for a in args),
-                                {k: _freeze(v) for k, v in kwargs.items()}))
+        self._calls.append(Call(
+            method,
+            tuple(_freeze(a) for a in args),
+            MappingProxyType({k: _freeze(v) for k, v in kwargs.items()}),
+        ))
 
     def calls_since(self, mark: int) -> list[Call]:
         """Calls recorded after `mark`, an index into .calls.
@@ -80,7 +150,7 @@ class _CallRecorder:
         Typical use: `mark = len(fake.control.calls)` taken before the
         action under test, then `fake.control.calls_since(mark)` after it.
         """
-        return self.calls[mark:]
+        return list(self._calls[mark:])
 
 
 @dataclass
@@ -121,7 +191,24 @@ class FakeControl(_CallRecorder):
 
     def servoJ(self, q, speed: float, acceleration: float, time: float,
                lookahead_time: float, gain: float) -> bool:
+        # Recorded BEFORE the target is set, deliberately. .calls answers
+        # "what did the driver put on the wire", not "what did the
+        # simulation manage to do with it", so a command this fake cannot
+        # simulate still belongs in the history. If a rejected call went
+        # unrecorded, a driver could put a command past the evidence base
+        # simply by malforming it, and claim (A) would be read from a log
+        # with holes in it. An evidence log may over-report; it must never
+        # under-report. Pinned by
+        # test_servoj_records_the_attempt_even_when_it_cannot_be_simulated.
         self._record("servoJ", q, speed, acceleration, time, lookahead_time, gain)
+        # reshape raises ValueError on a q that is not N_JOINTS long. That
+        # is simulation bookkeeping, not validation: the fake has nowhere
+        # to put a 3-element or 7-element target. It is emphatically NOT a
+        # safety check, and no safety check belongs in this class.
+        # Non-finite values pass straight through on purpose: this fake is
+        # a dumb transport, and the architecture depends on the driver's
+        # lack of safety logic staying observable through it. Pinned by
+        # test_servoj_accepts_non_finite_targets_because_the_fake_is_a_dumb_transport.
         self._clock.q_target = np.array(q, dtype=float).reshape(N_JOINTS)
         return True
 
@@ -129,7 +216,21 @@ class FakeControl(_CallRecorder):
         self._record("servoStop", a)
         # Real servoStop decelerates the robot to a halt; modelled here as
         # the target collapsing to the current position, so getActualQ
-        # stops advancing.
+        # stops advancing. Collapsing the target IS the behaviour, not an
+        # incidental detail: pinned by
+        # test_servostop_actually_stops_the_simulated_motion.
+        #
+        # A non-finite simulated position is absorbing, and servoStop does
+        # not clear it: halting AT the current position cannot help when
+        # the current position is itself NaN. That is deliberate. To
+        # sanitise here would hide from the kernel exactly the non-finite
+        # condition its guards exist to catch. Pinned by
+        # test_a_nan_target_poisons_the_state_and_servostop_does_not_clear_it.
+        # Whether a real UR5e controller would reject a NaN target at the
+        # wire is NOT measurable offline, because the real interfaces
+        # connect to hardware in their constructors, so their C++
+        # validators cannot be reached from this suite. This fake
+        # therefore makes no claim either way.
         self._clock.q_target = np.array(self._clock.q, dtype=float)
         return True
 
@@ -157,7 +258,14 @@ class FakeControl(_CallRecorder):
     @property
     def last_servoj_q(self) -> np.ndarray | None:
         """The joint target most recently passed to servoJ, or None if
-        servoJ has not been called yet."""
+        servoJ has not been called yet.
+
+        A copy, not the internal target. tests/test_guarded.py asserts
+        claim (A) through this property for all fifteen attacks, so a
+        caller able to reach _clock.q_target through the value handed back
+        could rewrite the very thing that claim is read from. Pinned by
+        test_last_servoj_q_is_a_copy_not_the_internal_target.
+        """
         return None if self._clock.q_target is None else np.array(self._clock.q_target)
 
 
