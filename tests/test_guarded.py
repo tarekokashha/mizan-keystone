@@ -50,7 +50,6 @@ from sentinel.kernel import SafetyKernel
 from sentinel.shield import Shield
 from sentinel.types import RobotState, Status
 
-import keystone.follower as follower_module
 from keystone.config import UR5eConfig
 from keystone.follower import UR5eFollower
 from keystone.guarded import GuardedUR5e, guarded_ur5e
@@ -90,25 +89,6 @@ class _Clock:
         self.t += dt
         self.driver_t += dt
 
-
-class _StampSource:
-    """Stands in for the `time` module inside keystone.follower.
-
-    keystone.follower.UR5eFollower.get_observation stamps every observation
-    with time.perf_counter(). Replacing the module-level name `time` with
-    this object, rather than patching the stdlib time module itself, keeps
-    the substitution inside the one module under test.
-
-    frozen=True models the attack stale_replay declares: the observation
-    stops advancing.
-    """
-
-    def __init__(self, clock: _Clock, frozen: bool = False) -> None:
-        self._clock = clock
-        self._frozen = frozen
-
-    def perf_counter(self) -> float:
-        return 0.0 if self._frozen else self._clock.driver_t
 
 
 def _state_from(obs: dict) -> RobotState:
@@ -332,7 +312,7 @@ def test_the_attack_catalogue_is_not_empty():
 
 
 @pytest.mark.parametrize("name", sorted(REGISTRY))
-def test_no_attack_reaches_servoj_unauthorised(name, monkeypatch):
+def test_no_attack_reaches_servoj_unauthorised(name):
     """Claim (A), exhaustively, for one attack from SENTINEL's catalogue.
 
     For every step: if the kernel emitted a command, exactly one servoJ call
@@ -366,9 +346,14 @@ def test_no_attack_reaches_servoj_unauthorised(name, monkeypatch):
     steps = STEPS_OVERRIDE.get(name, STEPS)
 
     clock = _Clock()
-    monkeypatch.setattr(follower_module, "time", _StampSource(clock, frozen=spec.freeze_state))
-
     fake = FakeRTDE(control_hz=UR5eConfig.declared().control_hz, q0=q0)
+    if spec.freeze_state:
+        # stale_replay declares freeze_state: the observation stops
+        # advancing. Model that by stalling the RTDE stream itself, so
+        # the controller serves a repeated sample and its timestamp
+        # stands still. Freezing the host clock instead would prove
+        # nothing now that the driver stamps from the controller.
+        fake.freeze_stream()
     robot = guarded_ur5e(UR5eConfig.declared(), envelope=env, rtde=fake, clock=clock)
     robot.connect()
 
@@ -495,51 +480,55 @@ def test_non_finite_first_observation_never_fabricates_a_zero_pose():
     assert servoj == [], f"a command reached servoJ from a non-finite start: {servoj}"
 
 
-# ---- a finding at the seam ---------------------------------------------------- #
+# ---- the seam defect, found by composing, and now closed ---------------------- #
 
-def test_finding_the_driver_stamp_is_a_host_clock_not_the_rtde_stream():
-    """Found by composing, which is the only place it is visible.
+def test_the_driver_stamp_freezes_with_the_stream_so_stale_can_fire():
+    """Regression test for a defect that only composition could expose.
 
     sentinel's staleness guard asks one question: is the driver's own
-    observation stamp advancing. keystone.follower.UR5eFollower answers it
-    with time.perf_counter(), the host's clock, which advances whether or not
-    the RTDE stream does. So a controller whose stream has frozen still
-    produces a stamp that marches forward, and the `stale` guard cannot see
-    it. Measured below: the fake's joint data is held still, and the stamp
-    advances anyway; and stale_replay run through the unpatched composition
-    fires qdd_max, qddd_max, tcp_box and tcp_speed, but never `stale`.
+    observation stamp advancing. The driver originally answered it with
+    time.perf_counter(), the host clock, which advances whether or not the
+    RTDE stream does. A controller whose stream had frozen still produced a
+    stamp marching forward, so `stale` could never fire through the real
+    driver. Measured at the time: stale_replay through the composition fired
+    qdd_max, qddd_max, tcp_box and tcp_speed, and never `stale`.
 
-    This is not a safety hole on its own. The kernel's tracking guard still
-    sees commanded and actual positions diverge. It is an integration defect
-    at the seam between M-01's assumption and M-03's driver, and it is
-    exactly the class of thing M-01 said it could not check.
+    It was invisible to M-01 by construction. M-01's fake driver could freeze
+    its stamp on request; a real driver reading a host clock cannot. The
+    probe could express the stall the shipped driver could not produce.
 
-    The fix belongs in keystone.follower, not here: stamp from
-    RTDEReceiveInterface.getTimestamp(), which is the controller's own clock
-    and does freeze when the stream does, and which the driver already holds
-    a reference to. The kernel compares that stamp only against its own
-    previous value, so changing its epoch is safe. When that lands, this test
-    must fail and be rewritten, which is the point of writing it down.
+    The driver now stamps from RTDEReceiveInterface.getTimestamp(), the
+    controller's own sample clock, which stands still exactly when the stream
+    does. The kernel compares that stamp only against its own previous value
+    and never against the kernel clock, so changing the epoch is safe. Both
+    halves are asserted below: the stamp freezes, and the guard fires.
     """
     cfg = UR5eConfig.declared()
+
+    # 1. A live stream advances the stamp.
     fake = FakeRTDE(control_hz=cfg.control_hz, q0=EPISODE_Q0)
     follower = UR5eFollower(cfg, rtde=fake)
+    a = follower.get_observation()
+    b = follower.get_observation()
+    assert b["timestamp_monotonic"] > a["timestamp_monotonic"]
 
-    first = follower.get_observation()
-    second = follower.get_observation()
+    # 2. A stalled stream freezes it, which the host clock would not do.
+    fake.freeze_stream()
+    c = follower.get_observation()
+    d = follower.get_observation()
+    assert d["timestamp_monotonic"] == c["timestamp_monotonic"], (
+        "the driver stamp still advances while the RTDE stream is stalled; "
+        "it is reading a host clock again")
+    assert np.array_equal(c["joint_position"], d["joint_position"])
 
-    # The joint data has not moved: nothing was ever commanded, so the fake
-    # holds position. The stamp moved anyway.
-    assert np.array_equal(first["joint_position"], second["joint_position"])
-    assert second["timestamp_monotonic"] > first["timestamp_monotonic"]
-
-    # And the consequence, through the composition, with no clock injected
-    # into the driver at all.
+    # 3. And the guard that exists for this now actually fires through the
+    #    whole composition, which is the property that was missing.
     env = Envelope.ur5e_declared()
     spec = REGISTRY["stale_replay"]
     attack = spec.build(env, np.random.default_rng(0))
     clock = _Clock()
     fake2 = FakeRTDE(control_hz=cfg.control_hz, q0=EPISODE_Q0)
+    fake2.freeze_stream()
     robot = guarded_ur5e(cfg, envelope=env, rtde=fake2, clock=clock)
 
     rules: set[str] = set()
@@ -551,7 +540,6 @@ def test_finding_the_driver_stamp_is_a_host_clock_not_the_rtde_stream():
         if robot.last_verdict.status is Status.STOP:
             robot.shield.kernel.rearm("composed episode continues after a trip")
 
-    assert "stale" not in rules, (
-        "the driver stamp now freezes with the stream; rewrite this test and "
-        "delete the finding")
-    assert rules, "stale_replay fired no guard at all, which is a different defect"
+    assert "stale" in rules, (
+        f"the staleness guard did not fire against a stalled stream; "
+        f"fired instead: {sorted(rules)}")

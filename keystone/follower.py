@@ -35,7 +35,6 @@ not need to know which one it was given.
 """
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import dashboard_client
@@ -144,7 +143,16 @@ class UR5eFollower(Robot):
             # LIMITATIONS.md): a fixed placeholder, not a measurement.
             # Never a real-robot number.
             "gripper_position": np.zeros(1, dtype=np.float64),
-            "timestamp_monotonic": time.perf_counter(),
+            # The CONTROLLER's sample clock, not this host's. The kernel's
+            # staleness guard asks whether the driver's stamp is advancing,
+            # and compares it only against its own previous value, never
+            # against the kernel clock, so the epoch does not matter but the
+            # source does. Stamping this with time.perf_counter() made that
+            # guard blind: the host clock advances whether or not the RTDE
+            # stream does, so a stalled controller still looked fresh and
+            # "stale" could never fire through the real driver. Measured and
+            # recorded in docs/decisions/task-4-staleness-is-blind.md.
+            "timestamp_monotonic": float(self.rtde.receive.getTimestamp()),
         }
 
     def send_action(self, action: RobotAction) -> RobotAction:

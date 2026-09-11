@@ -95,6 +95,12 @@ class _SimClock:
     q_target: np.ndarray | None = None
     qd: np.ndarray = field(default_factory=lambda: np.zeros(N_JOINTS))
     t: float = 0.0
+    # When True the RTDE stream is stalled: the controller keeps
+    # serving the same sample, so neither the timestamp nor the joint
+    # data advances. Without this the fake cannot model a stalled
+    # stream at all, and the kernel's staleness guard has nothing to
+    # fire on. See docs/decisions/task-4-staleness-is-blind.md.
+    stream_frozen: bool = False
 
 
 class FakeControl(_CallRecorder):
@@ -175,6 +181,10 @@ class FakeReceive(_CallRecorder):
     def getActualQ(self) -> list[float]:
         self._record("getActualQ")
         c = self._clock
+        if c.stream_frozen:
+            # A stalled stream serves the same sample again. Stepping
+            # the simulation here would make frozen data look fresh.
+            return [float(x) for x in c.q]
         target = c.q if c.q_target is None else c.q_target
         delta = target - c.q
         step = np.clip(delta, -_STEP_RAD_PER_SAMPLE, _STEP_RAD_PER_SAMPLE)
@@ -202,9 +212,16 @@ class FakeReceive(_CallRecorder):
         return [0.0] * N_JOINTS
 
     def getTimestamp(self) -> float:
+        """The controller's own sample clock, which is what the real
+        RTDEReceiveInterface.getTimestamp returns. Advances by one
+        control period per call, modelling one RTDE sample per call,
+        unless the stream is stalled, in which case the controller is
+        serving a repeated sample and the timestamp stands still.
+        """
         self._record("getTimestamp")
         t = self._clock.t
-        self._clock.t += 1.0 / self._clock.control_hz
+        if not self._clock.stream_frozen:
+            self._clock.t += 1.0 / self._clock.control_hz
         return t
 
     def disconnect(self) -> None:
@@ -258,3 +275,17 @@ class FakeRTDE:
         self.control = FakeControl(clock)
         self.receive = FakeReceive(clock)
         self.dashboard = FakeDashboard()
+        self._clock = clock
+
+    def freeze_stream(self) -> None:
+        """Stall the RTDE stream: the controller goes on serving the
+        same sample, so getTimestamp and getActualQ both stand still.
+        This is the condition the kernel's staleness guard exists to
+        catch, and it cannot be modelled by freezing the host clock,
+        because the host clock is not what a stalled controller stops.
+        """
+        self._clock.stream_frozen = True
+
+    def thaw_stream(self) -> None:
+        """Resume the RTDE stream after freeze_stream."""
+        self._clock.stream_frozen = False
