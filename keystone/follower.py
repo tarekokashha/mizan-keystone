@@ -26,12 +26,25 @@ driver so nothing reaches servoJ the Shield did not authorise. If you find
 yourself adding a guard here, stop: it belongs in sentinel.Envelope or the
 Shield, not in this module.
 
+One thing this driver does carry, and it is not safety logic: the
+connection contract the base class states. lerobot.robots.Robot's own
+docstring for is_connected says that when it is False, calling
+get_observation or send_action "should raise an error". They did not; a
+send_action after disconnect() issued servoJ on a control interface the
+driver had already torn down. get_observation and send_action now carry
+lerobot.utils.decorators.check_if_not_connected, the vendor's own check.
+That is transport state, and it reads is_connected and nothing else. It
+does not look at the action, so the claim above is untouched: no value in
+an action is clamped, validated or filtered here.
+
 `rtde` injects the deterministic fakes from keystone.rtde_fake, so the
 whole class is testable offline with no hardware and no Docker. When rtde
 is None, the real ur_rtde interfaces are constructed from config.ip and
 config.control_hz, bundled the same way keystone.rtde_fake.FakeRTDE bundles
 its fakes (.control, .receive, .dashboard), so the rest of this class does
-not need to know which one it was given.
+not need to know which one it was given. They are constructed in connect(),
+not in __init__: see the comment there for what the installed ur_rtde does
+on construction.
 """
 from __future__ import annotations
 
@@ -43,6 +56,7 @@ import rtde_control
 import rtde_receive
 from lerobot.processor import RobotAction, RobotObservation
 from lerobot.robots import Robot
+from lerobot.utils.decorators import check_if_not_connected
 
 from keystone.config import UR5eConfig
 
@@ -74,12 +88,20 @@ class UR5eFollower(Robot):
     def __init__(self, config: UR5eConfig, rtde: Any | None = None) -> None:
         super().__init__(config)
         self.config = config
-        if rtde is None:
-            rtde = _RTDEBundle(
-                control=rtde_control.RTDEControlInterface(config.ip, frequency=config.control_hz),
-                receive=rtde_receive.RTDEReceiveInterface(config.ip, frequency=config.control_hz),
-                dashboard=dashboard_client.DashboardClient(config.ip),
-            )
+        # rtde is stored as given and NOTHING is opened here. When it is
+        # None the real interfaces are built in connect(), not in this
+        # constructor, because constructing them is not inert: the installed
+        # ur_rtde 1.6.5 declares
+        #
+        #   __init__(self, hostname, frequency=-1.0,
+        #            flags=<Flags.FLAG_UPLOAD_SCRIPT: 1>, ...)
+        #
+        # measured from the pybind11 signature, so merely constructing a
+        # UR5eFollower would reach the address in config.ip and upload a
+        # control script before any caller had said connect(). The injection
+        # design is unchanged: an injected rtde is used exactly as handed
+        # over, and self.rtde is still the single attribute the rest of this
+        # class addresses.
         self.rtde = rtde
         self._connected = False
 
@@ -108,6 +130,18 @@ class UR5eFollower(Robot):
         # calibrate is accepted for signature compatibility with callers
         # that pass it (as real LeRobot scripts do); it has no effect,
         # because is_calibrated is always True below.
+        if self.rtde is None:
+            # The three real interfaces, built in the same order and at the
+            # same point in the sequence they were built before: still ahead
+            # of every dashboard call, so nothing about what this driver does
+            # to an arm changes, only when the sockets open. See __init__.
+            self.rtde = _RTDEBundle(
+                control=rtde_control.RTDEControlInterface(
+                    self.config.ip, frequency=self.config.control_hz),
+                receive=rtde_receive.RTDEReceiveInterface(
+                    self.config.ip, frequency=self.config.control_hz),
+                dashboard=dashboard_client.DashboardClient(self.config.ip),
+            )
         self.rtde.dashboard.connect()
         self.rtde.dashboard.powerOn()
         self.rtde.dashboard.brakeRelease()
@@ -133,6 +167,7 @@ class UR5eFollower(Robot):
         return None
 
     # ---- I/O ------------------------------------------------------------------ #
+    @check_if_not_connected
     def get_observation(self) -> RobotObservation:
         return {
             "joint_position": np.asarray(self.rtde.receive.getActualQ(), dtype=np.float64),
@@ -155,7 +190,15 @@ class UR5eFollower(Robot):
             "timestamp_monotonic": float(self.rtde.receive.getTimestamp()),
         }
 
+    @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
+        # The decorator is transport state, not safety: Robot.is_connected's
+        # own docstring requires get_observation and send_action to raise
+        # when is_connected is False, and lerobot.utils.decorators supplies
+        # the check, so this is the vendor's contract honoured rather than a
+        # rule invented here. It reads is_connected and nothing else; it does
+        # not look at the action at all. Everything below is unchanged.
+        #
         # No clamp, no limit, no finiteness check, no watchdog, no
         # cumulative guard. This is not an omission. See the module
         # docstring and
@@ -173,6 +216,12 @@ class UR5eFollower(Robot):
         return dict(action)
 
     def disconnect(self) -> None:
+        if self.rtde is None:
+            # connect() never ran, so no interface exists to stop, and
+            # building one here purely to close it would open the sockets
+            # this driver just stopped opening in __init__.
+            self._connected = False
+            return
         try:
             self.rtde.control.servoStop()
             self.rtde.control.stopScript()

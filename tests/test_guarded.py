@@ -32,12 +32,14 @@ deterministically:
   - the kernel's clock, injected through guarded_ur5e(clock=...), the same
     injection point SafetyKernel already provides. This is what lets
     watchdog_starve's declared skip_seconds actually exceed max_dt_s.
-  - the driver's observation stamp, injected by replacing the `time` name
-    inside keystone.follower for the duration of one test. This is what lets
-    stale_replay's declared freeze_state actually freeze an observation.
+  - the driver's observation stamp, which is not injected at all. It comes
+    from the controller's own sample clock, so stalling the RTDE stream with
+    FakeRTDE.freeze_stream() is what lets stale_replay's declared
+    freeze_state actually freeze an observation.
 
 The second of those is a finding in its own right, recorded in
-test_finding_the_driver_stamp_is_a_host_clock_not_the_rtde_stream below.
+docs/decisions/task-4-staleness-is-blind.md and regression-tested in
+test_the_driver_stamp_freezes_with_the_stream_so_stale_can_fire below.
 """
 from __future__ import annotations
 
@@ -71,23 +73,23 @@ STEPS_OVERRIDE = {"slow_drift": 2000}
 
 
 class _Clock:
-    """One simulated clock driving both the kernel and the driver stamp.
+    """The simulated clock the kernel is given.
 
-    Mirrors sentinel.redteam._Clock. `t` is what the kernel sees;
-    `driver_t` is what the driver stamps its observations with, and the two
-    are ticked together so a healthy episode looks healthy from both sides.
+    Mirrors sentinel.redteam._Clock. It drives the kernel only. It used to
+    carry a second field for the driver's observation stamp as well, back
+    when the driver read a host clock; the driver now stamps from the
+    controller's sample clock, which is FakeRTDE's to advance and not this
+    object's. See docs/decisions/task-4-staleness-is-blind.md.
     """
 
     def __init__(self) -> None:
         self.t = 0.0
-        self.driver_t = 0.0
 
     def __call__(self) -> float:
         return self.t
 
     def tick(self, dt: float = DT) -> None:
         self.t += dt
-        self.driver_t += dt
 
 
 
@@ -291,6 +293,7 @@ def test_the_adapter_does_not_clamp_the_kernel_does():
     """
     fake = FakeRTDE(q0=EPISODE_Q0)
     robot = guarded_ur5e(UR5eConfig.declared(), rtde=fake)
+    robot.connect()
     huge = np.full(6, 1e9)
 
     robot.get_observation()
@@ -470,6 +473,7 @@ def test_non_finite_first_observation_never_fabricates_a_zero_pose():
     """The specific fabricated value, named, so a regression is unambiguous."""
     fake = FakeRTDE(q0=[0.0, np.inf, 0.0, 0.0, 0.0, 0.0])
     robot = guarded_ur5e(UR5eConfig.declared(), rtde=fake)
+    robot.connect()
 
     for _ in range(5):
         obs = robot.get_observation()
@@ -508,6 +512,7 @@ def test_the_driver_stamp_freezes_with_the_stream_so_stale_can_fire():
     # 1. A live stream advances the stamp.
     fake = FakeRTDE(control_hz=cfg.control_hz, q0=EPISODE_Q0)
     follower = UR5eFollower(cfg, rtde=fake)
+    follower.connect()
     a = follower.get_observation()
     b = follower.get_observation()
     assert b["timestamp_monotonic"] > a["timestamp_monotonic"]
@@ -530,6 +535,7 @@ def test_the_driver_stamp_freezes_with_the_stream_so_stale_can_fire():
     fake2 = FakeRTDE(control_hz=cfg.control_hz, q0=EPISODE_Q0)
     fake2.freeze_stream()
     robot = guarded_ur5e(cfg, envelope=env, rtde=fake2, clock=clock)
+    robot.connect()
 
     rules: set[str] = set()
     for step in range(STEPS):
