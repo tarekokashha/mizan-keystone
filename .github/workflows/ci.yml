@@ -72,6 +72,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
       - name: report docker status
-        run: python -c "from keystone.ursim import docker_status; s=docker_status(); print(('available: ' if s.available else 'unavailable: ')+s.reason)"
+        run: |
+          python -c "from keystone.ursim import docker_status; s = docker_status(); print(('available' if s.available else 'unavailable'), s.reason, sep=': ')"
       - name: ursim tests
         run: python -m pytest tests/test_ursim.py -q -rs
