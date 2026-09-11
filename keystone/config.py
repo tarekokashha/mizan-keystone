@@ -4,8 +4,10 @@ Mirrors sentinel.envelope's provenance machinery, because the same defeats
 apply here. A review of M-01 found that `frozen=True` alone let both
 provenance and array fields be changed after construction: freezing a
 dataclass blocks rebinding an attribute, not mutating the mutable object an
-attribute points at. So provenance is stored as a MappingProxyType, and
-loading a "measured" value without a named human and a date is refused.
+attribute points at. So provenance and cameras are stored as read-only
+views, recursively, because a shallow MappingProxyType still hands back
+the caller's own nested dicts, and loading a "measured" value without a
+named human and a date is refused.
 
 What is deliberately absent matters as much as what is present. The kit's
 skeleton driver config carried `max_joint_velocity` and `max_force_norm`, and
@@ -19,13 +21,21 @@ resolvable from the LeRobot command line. RobotConfig is measured to be a
 non-frozen dataclass (see docs/decisions/task-1-2-correction.md), and Python
 forbids a frozen dataclass inheriting from a non-frozen one, so
 @dataclass(frozen=True) is not available here. Immutability after
-construction is enforced by a custom __setattr__ instead, guarded by a
-_frozen sentinel set true at the end of __post_init__. This is no weaker than
-frozen=True would have been: M-01 already found that frozen=True alone did
-not stop a mutable provenance dict or a writeable array from being changed
-after construction, so the same defences (MappingProxyType, read-only
-arrays) are needed either way, and a custom __setattr__ closes the same gap
-that frozen=True closes for plain attribute rebinding.
+construction is enforced by custom __setattr__ and __delattr__ methods
+instead, both guarded by a _frozen sentinel set true at the end of
+__post_init__. Both guards are needed for parity: frozen=True refuses
+`del cfg.x` as well as `cfg.x = y`, and a guarded __setattr__ on its own
+left `del cfg._frozen` as a two-token way to switch immutability off for
+the whole object, because _frozen has a plain default and so survives as a
+class attribute after the instance attribute is deleted, at which point
+the guard reads False back off the class. With both in place this is no
+weaker than frozen=True would have been. Parity is the claim, not
+invulnerability: object.__setattr__ and writing straight into cfg.__dict__
+defeat frozen=True too, and they defeat this the same way. Nor is parity
+sufficient on its own, which is why it is not the whole story here: M-01
+already found that frozen=True did not stop a mutable provenance dict or a
+writeable array from being changed after construction, so the read-only
+views below (MappingProxyType, applied recursively) are needed either way.
 
 id and calibration_dir are inherited from RobotConfig and are deliberately
 not redeclared here.
@@ -63,6 +73,37 @@ DATASHEET_SERVO_GAIN_RANGE = (100.0, 2000.0)
 # still walks them, so they must be exempted the same as the fields this
 # module does declare. Mirrors sentinel.envelope's _META_FIELDS.
 _META_FIELDS = ("id", "calibration_dir", "provenance", "measured_by", "measured_on")
+
+
+def _deep_freeze(value: object) -> object:
+    """A read-only view of value, all the way down.
+
+    MappingProxyType(dict(m)) is a shallow copy: it refuses
+    `cfg.cameras[k] = v` but not `cfg.cameras[k]["fps"] = 1`, and the
+    nested dict it hands back is still the caller's own object, so anyone
+    holding that handle can change the config, and with it sha256(), after
+    construction. cameras is a mapping of mappings, so the freeze has to
+    reach the bottom. Lists become tuples for the same reason; _plain()
+    turns them back into lists on the way out.
+    """
+    if isinstance(value, collections.abc.Mapping):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(v) for v in value)
+    return value
+
+
+def _plain(value: object) -> object:
+    """The inverse of _deep_freeze: plain, JSON-serialisable, unaliased.
+
+    Every mapping and sequence is rebuilt, so what to_dict() returns
+    shares no mutable object with the config it came from.
+    """
+    if isinstance(value, collections.abc.Mapping):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
 
 
 @RobotConfig.register_subclass("ur5e")
@@ -104,6 +145,21 @@ class UR5eConfig(RobotConfig):
             )
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        # The same guard as __setattr__, and not decoration: without it,
+        # `del cfg._frozen` alone switches immutability off. _frozen has a
+        # plain default, so deleting the instance attribute leaves the
+        # class attribute False behind for the guard above to read, and
+        # every field becomes rebindable again, including a servo_gain the
+        # constructor refused. servo_gain is passed straight to servoJ and
+        # the Shield never sees it, so that barrier has to hold.
+        if getattr(self, "_frozen", False):
+            raise AttributeError(
+                f"UR5eConfig is immutable after construction; use replace() to "
+                f"derive a new one. Attempted to delete {name!r}."
+            )
+        object.__delattr__(self, name)
+
     def __post_init__(self) -> None:
         # Deliberately does not call RobotConfig.__post_init__(): that method
         # assumes self.cameras holds lerobot CameraConfig objects and probes
@@ -118,9 +174,13 @@ class UR5eConfig(RobotConfig):
         # an otherwise-immutable object can still be mutated in place after
         # construction, because attribute-rebinding protection only stops
         # `cfg.provenance = other_dict`, not `cfg.provenance["x"] =
-        # "measured"`. A MappingProxyType view closes that.
-        object.__setattr__(self, "provenance", MappingProxyType(dict(self.provenance)))
-        object.__setattr__(self, "cameras", MappingProxyType(dict(self.cameras)))
+        # "measured"`. A MappingProxyType view closes that, but only at the
+        # level it is applied to: cameras is a mapping of mappings, and a
+        # shallow proxy leaves `cfg.cameras["webcam"]["fps"] = 1` open, with
+        # the caller's own nested dict still aliased into the config. So the
+        # freeze is recursive.
+        object.__setattr__(self, "provenance", _deep_freeze(self.provenance))
+        object.__setattr__(self, "cameras", _deep_freeze(self.cameras))
 
         if not self.ip:
             raise ValueError("ip must not be empty")
@@ -178,7 +238,10 @@ class UR5eConfig(RobotConfig):
                 continue
             v = getattr(self, f.name)
             if isinstance(v, collections.abc.Mapping):
-                d[f.name] = dict(v)
+                # _plain, not dict(v): a shallow copy hands the caller the
+                # config's own nested mappings back, and writing into one of
+                # those changes sha256() after construction.
+                d[f.name] = _plain(v)
             elif isinstance(v, Path):
                 d[f.name] = str(v)
             else:
