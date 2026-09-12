@@ -13,12 +13,15 @@ fails, because nobody can tell it apart from a slow one. Every docker
 invocation here therefore carries a timeout, and a timeout is treated as
 "Docker unavailable" with that reason recorded, not as an error to retry.
 
-PROVENANCE OF THE CONSTANTS BELOW. The image name and ports are
-configuration defaults, not measurements. They could not be verified on
-this host because the Docker engine never answered, so they are marked
-unverified and this module does not claim otherwise. Nothing here is a
-robot number, and nothing here was filled in to look complete: if a value
-was not checked, it says so.
+PROVENANCE OF THE CONSTANTS BELOW. The image name and ports began as
+configuration defaults marked unverified, because the development host's
+Docker engine never answered and they could not be checked. They have since
+been confirmed on a GitHub ubuntu runner: a container built from
+URSIM_IMAGE booted, both ports opened, and RTDE served a session through
+30004. They are therefore verified-in-ci, and not "measured", because that
+token belongs to the envelope provenance vocabulary where only a human may
+write it. Nothing here is a robot number, and nothing here was filled in to
+look complete: a value says exactly how far it has been checked.
 """
 from __future__ import annotations
 
@@ -36,7 +39,13 @@ PROBE_TIMEOUT_S = 5.0
 URSIM_IMAGE = "universalrobots/ursim_e-series"
 URSIM_DASHBOARD_PORT = 29999
 URSIM_RTDE_PORT = 30004
-CONSTANT_PROVENANCE = "unverified"
+# Was "unverified" while the development host's engine never answered. A
+# container built from this image has since booted on a GitHub ubuntu runner
+# and opened both ports, and RTDE served a session through 30004, so these
+# three constants are now confirmed by observation. Deliberately not the word
+# "measured": that token belongs to the envelope provenance vocabulary, where
+# only a human may write it.
+CONSTANT_PROVENANCE = "verified-in-ci"
 
 
 @dataclass(frozen=True)

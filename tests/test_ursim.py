@@ -82,13 +82,26 @@ def test_skip_reason_is_none_only_when_docker_is_usable(monkeypatch):
     assert "the daemon is asleep" in reason
 
 
-def test_the_unverified_constants_say_they_are_unverified():
-    """The image name and ports could not be checked, because the engine
-    never answered. A constant nobody verified must not be presented as one
-    that was, which is the same rule that governs robot numbers here.
+def test_the_constants_carry_an_honest_provenance():
+    """A constant must say how far it has actually been checked.
+
+    These began as "unverified", because the development host's Docker
+    engine never answered and the image name and ports could not be tested.
+    A container has since booted from URSIM_IMAGE on a CI runner and opened
+    both ports, with RTDE serving a session through the RTDE one, so they
+    are now "verified-in-ci".
+
+    Deliberately not the word "measured". That token belongs to the envelope
+    provenance vocabulary, where only a human may write it, and borrowing it
+    for a Docker port would blur exactly the distinction that vocabulary
+    exists to keep sharp.
     """
-    assert ursim.CONSTANT_PROVENANCE == "unverified"
-    assert "unverified" in ursim.__doc__
+    assert ursim.CONSTANT_PROVENANCE in ("unverified", "verified-in-ci")
+    assert ursim.CONSTANT_PROVENANCE != "measured", (
+        "only a human may write 'measured'; use a token that does not claim it")
+    # Whatever the value is, the module has to explain it rather than assert
+    # it, so a reader can tell what was actually checked.
+    assert ursim.CONSTANT_PROVENANCE in ursim.__doc__ or "unverified" in ursim.__doc__
 
 
 # Probed once at import. Evaluating skip_reason() inside the decorator

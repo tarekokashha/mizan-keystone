@@ -216,3 +216,53 @@ that requires a controller remains unmeasured and is reported as unmeasured.
 ## 10. Deviations after the outcome
 
 (none)
+
+## 11. Addendum: URSim, measured after all
+
+Section 2 recorded end-to-end RTDE timing as unmeasured because the Docker
+engine on the development host never answered. That remained true of that
+host. It stopped being true of the programme once CI showed a working engine
+on a GitHub ubuntu runner, so the measurement was taken there rather than
+left undone. Nothing in sections 1 to 7 was changed to accommodate it.
+
+Observed on `ubuntu-latest`, image `universalrobots/ursim_e-series`:
+
+```
+URSim ready: RTDE session established after 4 attempts
+URSim powered: robot mode Robotmode: RUNNING
+  samples              : 2000
+  wall elapsed s       : 2.148188
+  read rate Hz         : 931.0
+  controller dt p50 s  : 0.008000
+  read gap p50 us      : 1072.45
+  read gap p99 us      : 1120.54
+  read gap p99.9 us    : 1196.14
+```
+
+**The one figure that means what it appears to mean is `controller dt p50`.**
+It is 0.008000 s, exactly 125 Hz, and it is the controller's own sample
+period read from its own clock. That is an independent confirmation that the
+rate `UR5eConfig.declared()` carries is the rate a real controller serves.
+
+**The read gap figures do not measure RTDE latency and must not be quoted as
+if they did.** The sampling loop contains a deliberate 1 ms sleep, for the
+reason in section 3's spirit: an earlier attempt read 2000 timestamps in a
+few milliseconds, landed entirely inside one controller sample, and
+concluded the stream was frozen when it was merely slower than the reader.
+A p50 read gap of 1072.45 us is therefore that 1 ms sleep plus overhead. It
+describes this test's pacing, not the controller's.
+
+### What is still unmeasured, and why
+
+The **control** direction. `RTDEControlInterface` uploads a control script
+and requires the teach pendant in remote control mode, which headless URSim
+does not offer:
+
+```
+RuntimeError: Failed to start RTDE data synchronization, before timeout
+```
+
+So `servoJ` has still never been issued to a controller, simulated or real.
+Claim (A) remains established against the deterministic fake only. The test
+skips on exactly that message and fails on any other RuntimeError, so the
+gap cannot silently widen into an absorbed regression.

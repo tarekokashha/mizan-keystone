@@ -248,17 +248,41 @@ they are the operating system descheduling the process. That attribution is
 only available because both configurations were measured; timing the composed
 stack alone would have blamed the safety layer for them.
 
-**Still unmeasured: end-to-end RTDE timing.** It needs URSim, and on the
-development host Docker Desktop's processes run while its CLI never answers,
-so the suite skips with a reason rather than failing.
+### Claim (B), the controller half: measured on CI
 
-CI is a different story and the distinction matters. GitHub's ubuntu runners
-do have a working engine, so the `ursim` job passes there rather than
-skipping. That proves the skip logic works and Docker is present. It does
-**not** measure URSim: the smoke test asserts only that the engine is
-reachable, and never starts a container or opens an RTDE connection. That
-half of claim (B) is still unmeasured, and running URSim on that runner is
-the obvious next step. See [LIMITATIONS.md](LIMITATIONS.md).
+On the development host Docker Desktop's processes run while its CLI never
+answers, so URSim could not be started there and the suite skips with a
+reason. CI has a working engine, so the measurement was taken there rather
+than left undone. URSim boots, the arm is powered on through the dashboard,
+and RTDE is read from a real UR controller:
+
+```
+URSim ready: RTDE session established after 4 attempts
+URSim powered: robot mode Robotmode: RUNNING
+  samples              : 2000
+  wall elapsed s       : 2.148188
+  read rate Hz         : 931.0
+  controller dt p50 s  : 0.008000
+  read gap p50 us      : 1072.45
+```
+
+**The figure that means what it looks like is `controller dt p50`: 0.008000
+s, exactly 125 Hz.** That is the controller's own sample period, read from
+its own clock, and it independently confirms that the rate
+`UR5eConfig.declared()` carries is the rate a real controller serves.
+
+**The read gap figures do not measure RTDE latency.** The sampling loop
+holds a deliberate 1 ms sleep, so a p50 of 1072 us is that sleep plus
+overhead and describes this test's pacing, not the controller's. The sleep
+exists because an earlier attempt read 2000 timestamps in a few
+milliseconds, landed inside a single controller sample, and concluded the
+stream was frozen when it was only slower than the reader.
+
+**Still unmeasured: the control direction.** `RTDEControlInterface` uploads
+a control script and needs the pendant in remote control mode, which
+headless URSim does not offer, so `servoJ` has never been issued to a
+controller. Claim (A) rests on the deterministic fake alone. See
+[LIMITATIONS.md](LIMITATIONS.md).
 
 ---
 

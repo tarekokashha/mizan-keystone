@@ -20,30 +20,42 @@ adversarial instruction outside URSim until the controller enforces joint,
 velocity and force envelopes in hardware. This programme does not lift that
 gate. It builds the attachment and proves the attachment.
 
-## Claim (B) is half unmeasured
+## Claim (B): the receive half is measured, the control half is not
 
-End-to-end RTDE timing was never measured, because URSim could not be
-started. On the host used, Docker Desktop's processes were running while
-`docker version`, `docker ps` and `docker info` each returned no output, no
-error, and had to be killed by a timeout.
+URSim cannot be started on the development host, where Docker Desktop's
+processes run while `docker version`, `docker ps` and `docker info` each
+return no output, no error, and have to be killed by a timeout. The suite
+skips there with a reason. A skip is not a pass.
 
-The suite skips that integration with a reason rather than failing, which is
-the designed behaviour, but a skip is not a pass. The half of claim (B) that
-requires a controller is **unmeasured**, not "assumed fine".
+On CI the engine works, so the measurement was taken there. URSim boots, the
+arm powers on to `Robotmode: RUNNING`, and RTDE is read from a real
+controller. Details and numbers are in [PROTOCOL.md](PROTOCOL.md) section
+11. What that does and does not establish:
 
-Consequences worth stating separately:
+- **Established.** A real UR controller serves a sample period of 0.008000 s
+  at the median, exactly the 125 Hz `UR5eConfig.declared()` carries. The
+  driver's controller-clock stamp, introduced by the staleness fix, reads a
+  genuine controller clock.
+- **Not established, and easy to misread.** The reported read gaps are
+  dominated by a deliberate 1 ms sleep in the sampling loop. They describe
+  the test's pacing, not RTDE latency, and must not be quoted as latency.
+- **Not established at all: the control direction.**
+  `RTDEControlInterface` uploads a control script and requires the teach
+  pendant in remote control mode, which headless URSim does not offer:
 
-- The timing figures in [PROTOCOL.md](PROTOCOL.md) section 9 are the cost of
-  the **software** against a deterministic fake. The real figure including a
-  socket, a NAT and a controller can only be worse, never better.
-- The `ursim` CI job **now passes**, and that means less than it sounds.
-  GitHub's ubuntu runners do have a working engine (`docker server 28.0.4`),
-  so on CI the skip does not fire and `test_ursim_container_smoke` runs. But
-  that test only asserts that Docker is reachable. **It does not start a
-  URSim container, and it does not open an RTDE connection.** Passing there
-  proves the skip logic works and the engine is present, nothing more.
-  Actually exercising URSim on that runner is the obvious next step and has
-  not been done.
+  ```
+  RuntimeError: Failed to start RTDE data synchronization, before timeout
+  ```
+
+  So **`servoJ` has never been issued to any controller**, simulated or
+  real. Every claim (A) result in this repository rests on the deterministic
+  fake. The integration test skips on exactly that message and fails on any
+  other `RuntimeError`, so this gap cannot quietly widen into an absorbed
+  regression, but it is the largest thing still open.
+
+- The timing figures in [PROTOCOL.md](PROTOCOL.md) section 9 remain the cost
+  of the **software** against the fake. The real figure including a socket,
+  a NAT and a controller can only be worse, never better.
 
 ## This platform offers no real-time guarantee, and the measurement says so
 
