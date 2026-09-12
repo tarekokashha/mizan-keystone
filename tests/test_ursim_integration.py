@@ -134,23 +134,35 @@ def test_the_controller_clock_advances_and_its_rate_is_reported(ursim):
 
     rtde = rtde_receive.RTDEReceiveInterface(HOST)
     try:
-        stamps = np.empty(SAMPLES, dtype=np.float64)
-        wall = np.empty(SAMPLES, dtype=np.float64)
-        for i in range(SAMPLES):
-            stamps[i] = rtde.getTimestamp()
-            wall[i] = time.perf_counter()
+        # Sample over a wall-clock window, not for a fixed number of reads.
+        # A tight Python loop completes 2000 getTimestamp() calls in a few
+        # milliseconds, far faster than the controller produces samples, so
+        # every read returns the same one and the stream looks frozen when it
+        # is merely slower than the reader. That is what the first attempt
+        # measured, and it is the same error as timing a stalled stream with
+        # a host clock: sample the thing on its own terms.
+        stamps_l: list[float] = []
+        wall_l: list[float] = []
+        window_s = 3.0
+        t_end = time.perf_counter() + window_s
+        while time.perf_counter() < t_end and len(stamps_l) < SAMPLES:
+            stamps_l.append(rtde.getTimestamp())
+            wall_l.append(time.perf_counter())
+            time.sleep(0.001)
+        stamps = np.asarray(stamps_l, dtype=np.float64)
+        wall = np.asarray(wall_l, dtype=np.float64)
 
         advanced = np.diff(stamps)
         moved = advanced[advanced > 0]
         assert moved.size > 0, (
-            "the controller timestamp never advanced across "
-            f"{SAMPLES} reads, so the RTDE stream is not live")
+            f"the controller timestamp never advanced across {stamps.size} reads "
+            f"spanning {wall[-1] - wall[0]:.3f}s, so the RTDE stream is not live")
 
         elapsed = wall[-1] - wall[0]
         wall_us = np.diff(wall) * 1e6
         print(
             "\nURSim RTDE, measured and not asserted:"
-            f"\n  samples              : {SAMPLES}"
+            f"\n  samples              : {stamps.size}"
             f"\n  wall elapsed s       : {elapsed:.6f}"
             f"\n  read rate Hz         : {SAMPLES / elapsed if elapsed > 0 else float('inf'):.1f}"
             f"\n  controller dt p50 s  : {float(np.median(moved)):.6f}"
@@ -181,7 +193,24 @@ def test_the_real_driver_reads_a_real_controller(ursim):
 
     cfg = UR5eConfig.declared().replace(ip=HOST)
     robot = UR5eFollower(cfg)
-    robot.connect()
+    try:
+        robot.connect()
+    except RuntimeError as exc:
+        # RTDEControlInterface uploads a control script and needs the teach
+        # pendant in remote control mode. Headless URSim starts in local
+        # mode and there is no way to change that without PolyScope, so this
+        # is an environment limit rather than a defect here. Measured:
+        #
+        #   RuntimeError: Failed to start RTDE data synchronization, before timeout
+        #
+        # Narrow on purpose: any other RuntimeError is a real failure and is
+        # allowed to propagate, so this cannot quietly absorb a regression.
+        if "data synchronization" not in str(exc):
+            raise
+        pytest.skip(
+            "URSim accepts RTDE receive but refuses RTDE control: "
+            f"{exc}. The control interface needs remote control mode, which "
+            "headless URSim does not offer. See LIMITATIONS.md.")
     try:
         assert robot.is_connected
 
@@ -192,10 +221,14 @@ def test_the_real_driver_reads_a_real_controller(ursim):
 
         # The controller clock, through the driver, against real hardware
         # simulation. This is the property the staleness fix turns on.
+        # Sampled over a wall-clock window for the reason given in the
+        # receive test: reading faster than the controller produces samples
+        # makes a live stream look frozen.
         stamps = []
-        deadline = time.perf_counter() + 30.0
-        while len(stamps) < 200 and time.perf_counter() < deadline:
+        deadline = time.perf_counter() + 3.0
+        while len(stamps) < 2000 and time.perf_counter() < deadline:
             stamps.append(robot.get_observation()["timestamp_monotonic"])
+            time.sleep(0.001)
         arr = np.asarray(stamps, dtype=float)
         advanced = np.diff(arr)
         assert np.any(advanced > 0), (
