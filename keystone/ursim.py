@@ -193,3 +193,48 @@ def container_logs(name: str = CONTAINER_NAME, tail: int = 40) -> str:
     except (subprocess.TimeoutExpired, OSError) as exc:
         return f"(could not read logs: {exc})"
     return ((proc.stdout or "") + (proc.stderr or "")).strip() or "(no output)"
+
+
+def wait_for_rtde(host: str, timeout_s: float = BOOT_TIMEOUT_S) -> tuple[bool, str]:
+    """Wait until RTDE will actually open a session, not merely accept a socket.
+
+    Measured on a GitHub ubuntu runner: URSim's RTDE port starts listening
+    well before the controller can serve a session, so wait_for_tcp returns
+    True and RTDEReceiveInterface then fails with
+
+        RuntimeError: read: Connection reset by peer
+
+    A port accepting a connection is not a controller that is ready. The only
+    honest readiness signal for "RTDE works" is RTDE working, so this
+    constructs the real interface and retries until it succeeds or the
+    deadline passes, and reports the last error rather than swallowing it.
+    """
+    import time as _time
+
+    try:
+        import rtde_receive
+    except ImportError as exc:  # pragma: no cover - ur_rtde is a hard dependency
+        return False, f"ur_rtde is not importable: {exc}"
+
+    deadline = _time.monotonic() + timeout_s
+    last = "no attempt was made"
+    attempts = 0
+    while _time.monotonic() < deadline:
+        attempts += 1
+        try:
+            rtde = rtde_receive.RTDEReceiveInterface(host)
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+            _time.sleep(3.0)
+            continue
+        try:
+            if rtde.isConnected():
+                return True, f"RTDE session established after {attempts} attempts"
+            last = "constructed but isConnected() was False"
+        finally:
+            try:
+                rtde.disconnect()
+            except Exception:
+                pass
+        _time.sleep(3.0)
+    return False, f"no RTDE session within {timeout_s:g}s after {attempts} attempts; last error: {last}"

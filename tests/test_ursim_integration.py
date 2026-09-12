@@ -31,6 +31,7 @@ from keystone.ursim import (
     pull_image,
     start_container,
     stop_container,
+    wait_for_rtde,
     wait_for_tcp,
 )
 
@@ -71,6 +72,15 @@ def ursim():
             pytest.fail(
                 f"URSim RTDE port {URSIM_RTDE_PORT} never opened within "
                 f"{BOOT_TIMEOUT_S:g}s. Container logs:\n{container_logs()}")
+        # The port listening is not the controller being ready. Measured on a
+        # runner: the socket accepts well before RTDE will open a session, and
+        # the interface then fails with "read: Connection reset by peer". So
+        # wait for the thing that is actually needed.
+        ready, why = wait_for_rtde(HOST, BOOT_TIMEOUT_S)
+        if not ready:
+            pytest.fail(
+                f"URSim never served RTDE: {why}\nContainer logs:\n{container_logs()}")
+        print(f"\nURSim ready: {why}")
         yield handle
     finally:
         stop_container()
