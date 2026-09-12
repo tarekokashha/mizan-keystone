@@ -90,3 +90,106 @@ def skip_reason() -> str | None:
     """
     status = docker_status()
     return None if status.available else f"URSim unavailable: {status.reason}"
+
+
+# ---- container lifecycle ---------------------------------------------------- #
+#
+# Everything below runs only where the Docker engine answers. On the
+# development host it never did, so this path was written against GitHub's
+# ubuntu runners, where `docker server 28.0.4` was observed. Timeouts are
+# generous because the image is large and the controller takes time to boot,
+# but every one is bounded, for the reason in the module docstring.
+
+PULL_TIMEOUT_S = 900.0
+BOOT_TIMEOUT_S = 240.0
+STOP_TIMEOUT_S = 60.0
+CONTAINER_NAME = "keystone-ursim"
+
+
+@dataclass(frozen=True)
+class ContainerHandle:
+    """A running URSim container, and how it was reached."""
+
+    name: str
+    container_id: str
+    image: str
+
+
+def _docker(args: Sequence[str], timeout_s: float,
+            runner: Callable[..., subprocess.CompletedProcess] = _run):
+    return runner(["docker", *args], timeout_s)
+
+
+def pull_image(image: str = URSIM_IMAGE, timeout_s: float = PULL_TIMEOUT_S) -> DockerStatus:
+    """Pull the URSim image, reporting rather than raising."""
+    try:
+        proc = _docker(["pull", image], timeout_s)
+    except subprocess.TimeoutExpired:
+        return DockerStatus(False, f"docker pull {image} exceeded {timeout_s:g}s")
+    except OSError as exc:
+        return DockerStatus(False, f"docker pull could not run: {exc}")
+    if proc.returncode != 0:
+        first = (proc.stderr or proc.stdout or "no output").strip().splitlines()[0]
+        return DockerStatus(False, f"docker pull {image} failed: {first}")
+    return DockerStatus(True, f"pulled {image}")
+
+
+def wait_for_tcp(host: str, port: int, timeout_s: float) -> bool:
+    """True once `port` accepts a connection, False if `timeout_s` elapses.
+
+    URSim reports nothing useful on stdout while the controller boots, so
+    the port accepting a connection is the only honest readiness signal
+    available from outside the container.
+    """
+    import socket
+    import time as _time
+
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=2.0):
+                return True
+        except OSError:
+            _time.sleep(1.0)
+    return False
+
+
+def start_container(image: str = URSIM_IMAGE, name: str = CONTAINER_NAME,
+                    timeout_s: float = 120.0) -> tuple[ContainerHandle | None, str]:
+    """Start URSim detached, publishing the dashboard and RTDE ports."""
+    _docker(["rm", "-f", name], STOP_TIMEOUT_S)  # ignore result; may not exist
+    args = [
+        "run", "-d", "--name", name,
+        "-p", f"{URSIM_DASHBOARD_PORT}:{URSIM_DASHBOARD_PORT}",
+        "-p", f"{URSIM_RTDE_PORT}:{URSIM_RTDE_PORT}",
+        image,
+    ]
+    try:
+        proc = _docker(args, timeout_s)
+    except subprocess.TimeoutExpired:
+        return None, f"docker run exceeded {timeout_s:g}s"
+    except OSError as exc:
+        return None, f"docker run could not execute: {exc}"
+    if proc.returncode != 0:
+        first = (proc.stderr or proc.stdout or "no output").strip().splitlines()[0]
+        return None, f"docker run failed: {first}"
+    return ContainerHandle(name=name, container_id=proc.stdout.strip(), image=image), "started"
+
+
+def stop_container(name: str = CONTAINER_NAME) -> None:
+    """Remove the container. Best effort: a leaked container on a throwaway
+    CI runner is not worth raising over, and raising here would mask the
+    test failure that sent us into teardown.
+    """
+    try:
+        _docker(["rm", "-f", name], STOP_TIMEOUT_S)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def container_logs(name: str = CONTAINER_NAME, tail: int = 40) -> str:
+    try:
+        proc = _docker(["logs", "--tail", str(tail), name], 30.0)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return f"(could not read logs: {exc})"
+    return ((proc.stdout or "") + (proc.stderr or "")).strip() or "(no output)"

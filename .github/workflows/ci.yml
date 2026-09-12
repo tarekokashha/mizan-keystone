@@ -78,3 +78,12 @@ jobs:
           python -c "from keystone.ursim import docker_status; s = docker_status(); print(('available' if s.available else 'unavailable'), s.reason, sep=': ')"
       - name: ursim tests
         run: python -m pytest tests/test_ursim.py -q -rs
+      # The real integration: pulls URSim, boots a controller, opens RTDE and
+      # measures the controller clock. Opt in via KEYSTONE_URSIM so the
+      # multi-gigabyte pull happens in this job and nowhere else. -s so the
+      # measured distribution reaches the log, since it is reported and never
+      # gated.
+      - name: ursim integration
+        env:
+          KEYSTONE_URSIM: "1"
+        run: python -m pytest tests/test_ursim_integration.py -q -rs -s
