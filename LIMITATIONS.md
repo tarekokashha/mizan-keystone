@@ -36,9 +36,14 @@ Consequences worth stating separately:
 - The timing figures in [PROTOCOL.md](PROTOCOL.md) section 9 are the cost of
   the **software** against a deterministic fake. The real figure including a
   socket, a NAT and a controller can only be worse, never better.
-- The `ursim` CI job has **never been observed to pass**. It is marked
-  UNVERIFIED in the workflow file itself. It exists so the path is there and
-  is honest about its status, not because it is known to work.
+- The `ursim` CI job **now passes**, and that means less than it sounds.
+  GitHub's ubuntu runners do have a working engine (`docker server 28.0.4`),
+  so on CI the skip does not fire and `test_ursim_container_smoke` runs. But
+  that test only asserts that Docker is reachable. **It does not start a
+  URSim container, and it does not open an RTDE connection.** Passing there
+  proves the skip logic works and the engine is present, nothing more.
+  Actually exercising URSim on that runner is the obvious next step and has
+  not been done.
 
 ## This platform offers no real-time guarantee, and the measurement says so
 

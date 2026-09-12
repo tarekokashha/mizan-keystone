@@ -56,10 +56,12 @@ jobs:
   # reason. GitHub's ubuntu runners do have Docker, which makes this the one
   # place the skip might not fire.
   #
-  # UNVERIFIED: this job has never been observed to pass. It could not be,
-  # because the environment that would run it was unavailable. It is here so
-  # the path exists and is honest about its status, not because it is known
-  # to work. See LIMITATIONS.md.
+  # STATUS: this job passes, and it proves less than that sounds. The runner
+  # has a working engine (docker server 28.0.4 observed), so the skip does
+  # not fire here and the smoke test runs. But that test only asserts Docker
+  # is reachable. It does not start a URSim container and does not open an
+  # RTDE connection, so end-to-end timing remains unmeasured. See
+  # LIMITATIONS.md before citing this job as evidence of anything.
   ursim:
     runs-on: ubuntu-latest
     steps:

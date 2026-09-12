@@ -248,11 +248,17 @@ they are the operating system descheduling the process. That attribution is
 only available because both configurations were measured; timing the composed
 stack alone would have blamed the safety layer for them.
 
-**Still unmeasured: end-to-end RTDE timing.** It needs URSim, and on this
-host Docker Desktop's processes run while its CLI never answers. The suite
-skips with a reason rather than failing, and that half of claim (B) is
-reported as unmeasured rather than estimated. See
-[LIMITATIONS.md](LIMITATIONS.md).
+**Still unmeasured: end-to-end RTDE timing.** It needs URSim, and on the
+development host Docker Desktop's processes run while its CLI never answers,
+so the suite skips with a reason rather than failing.
+
+CI is a different story and the distinction matters. GitHub's ubuntu runners
+do have a working engine, so the `ursim` job passes there rather than
+skipping. That proves the skip logic works and Docker is present. It does
+**not** measure URSim: the smoke test asserts only that the engine is
+reachable, and never starts a container or opens an RTDE connection. That
+half of claim (B) is still unmeasured, and running URSim on that runner is
+the obvious next step. See [LIMITATIONS.md](LIMITATIONS.md).
 
 ---
 
