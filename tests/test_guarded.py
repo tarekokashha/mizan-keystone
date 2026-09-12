@@ -119,18 +119,32 @@ def _payload(action) -> dict:
 
 # ---- the adapter is a real LeRobot plugin, and the Shield is not ------------ #
 
-def test_the_shield_alone_is_not_a_lerobot_robot():
-    """The measurement behind docs/decisions/task-4-shield-is-not-a-lerobot-plugin.md.
+def test_the_shield_now_implements_the_whole_contract_but_is_still_not_a_robot():
+    """Follows docs/decisions/task-4-shield-is-not-a-lerobot-plugin.md, which
+    this test outlived on purpose.
 
-    M-01's Shield implements eight of Robot's ten abstract members and does
-    not inherit from Robot. The two it lacks are exactly the two the vendor
-    skeleton lacked. This is asserted here rather than only written down, so
-    the day sentinel grows them the decision record stops being true and
-    this test says so.
+    It used to assert the defect: M-01's Shield implemented eight of Robot's
+    ten abstract members, missing exactly the two the vendor skeleton
+    missed. Its docstring said that the day sentinel grew them, this test
+    would say so. Sentinel grew them, this test said so on the very next
+    run, and the assertions below are what replaced it.
+
+    Two things are now true at once and both matter here. The Shield
+    implements every member, so duck-typed use works. It still does not
+    inherit from Robot, deliberately, because importing the base class would
+    make a large ML stack a hard runtime dependency of a numpy-only safety
+    kernel. That second fact is why GuardedUR5e still earns its place in
+    this repository, where lerobot is a dependency already.
     """
-    assert not issubclass(Shield, Robot)
-    assert sorted(m for m in Robot.__abstractmethods__ if not hasattr(Shield, m)) == [
-        "configure", "is_calibrated"]
+    missing = sorted(m for m in Robot.__abstractmethods__ if not hasattr(Shield, m))
+    assert missing == [], (
+        f"sentinel.Shield has regressed and is missing {missing}; this was "
+        f"fixed upstream after M-03 found it by composing")
+
+    assert not issubclass(Shield, Robot), (
+        "Shield now inherits from Robot, which means sentinel took a hard "
+        "dependency on lerobot. If that was deliberate, GuardedUR5e's reason "
+        "for existing has changed and this test should be rewritten again")
 
 
 def test_guarded_ur5e_is_a_real_lerobot_plugin():

@@ -137,7 +137,18 @@ that would have caught it.
 
 `GuardedUR5e` closes it by completing the ABC through delegation, adding no
 safety logic, so claim (A) stays a claim about the kernel rather than about
-an adapter. Full record:
+an adapter.
+
+**It is also now fixed upstream.** M-01 SENTINEL's `Shield` implements all
+ten members, and `sentinel.lerobot_plugin.ShieldRobot` provides a real
+`Robot` subclass behind an optional extra. The Shield still does not inherit
+from `Robot`, deliberately: inheriting would make a large ML stack a hard
+runtime dependency of a numpy-only safety kernel. So `GuardedUR5e` keeps its
+place here, where `lerobot` is a dependency already.
+
+The test that pinned the original defect was written to fail the day it was
+fixed. It did, on the first run after the upstream change landed, and it now
+asserts both halves of the new state instead of being deleted. Full record:
 [docs/decisions/task-4-shield-is-not-a-lerobot-plugin.md](docs/decisions/task-4-shield-is-not-a-lerobot-plugin.md).
 
 ### 2. The staleness guard was blind through the real driver

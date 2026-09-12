@@ -71,3 +71,32 @@ recorded here and belongs in M-01's `LIMITATIONS.md` as a defect found by
 M-03. It is not a safety defect: the Shield's guards all still run. It is
 an integration defect, and it means the sentence "the Shield wraps a
 LeRobot robot" was never true of the real base class.
+
+---
+
+## Resolution: fixed upstream
+
+M-01 SENTINEL has since closed this. `sentinel.shield.Shield` now implements
+all ten members, and `sentinel.lerobot_plugin.ShieldRobot` provides a real
+`lerobot.robots.Robot` subclass for callers that need `isinstance`.
+
+Two details of that fix matter here.
+
+**The Shield still does not inherit from `Robot`.** Inheriting would make a
+large ML stack a hard runtime dependency of a numpy-only safety kernel, which
+is how a kernel ends up vendored rather than depended on. So the subclass
+lives behind an optional extra upstream, and `GuardedUR5e` keeps its place in
+this repository, where `lerobot` is a dependency already.
+
+**The lifecycle hooks upstream are soft delegations.** `Shield` promises to
+wrap an object providing only `get_observation` and `send_action`, so
+requiring lifecycle hooks would break its own contract. `calibrate` used to
+hard delegate and would have raised `AttributeError` against the minimal fake
+M-01's own Shield tests wrap, had anything ever called it.
+
+`tests/test_guarded.py::test_the_shield_alone_is_not_a_lerobot_robot` was
+written to fail on exactly this day, and it did, on the first run after the
+upstream change landed. It has been rewritten as
+`test_the_shield_now_implements_the_whole_contract_but_is_still_not_a_robot`,
+which asserts both halves of the new state: the contract is complete, and the
+inheritance is still deliberately absent.

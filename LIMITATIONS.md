@@ -159,14 +159,28 @@ That is a strong result and it is not a proof. It is exhaustive over
 SENTINEL's attack catalogue at those horizons, not over all possible action
 sequences. An attack nobody wrote is an attack nobody ran.
 
-## The Shield defect is worked around here, not fixed upstream
+## The Shield defect is now fixed upstream, and the adapter still earns its place
 
-M-03 found that `sentinel.shield.Shield` is not a `lerobot.robots.Robot`
-subclass and implements eight of its ten abstract members. This repository
-closes that with the `GuardedUR5e` adapter.
+M-03 found that `sentinel.shield.Shield` was not a `lerobot.robots.Robot`
+subclass and implemented eight of its ten abstract members. **That has since
+been fixed in M-01 SENTINEL**: the Shield implements all ten, and
+`sentinel.lerobot_plugin.ShieldRobot` provides a real `Robot` subclass behind
+an optional extra.
 
-**The upstream defect still exists.** M-01 SENTINEL continues to ship a
-Shield that cannot be handed to `lerobot-record` on its own. Anyone using
+The Shield still does not inherit from `Robot`, deliberately, because
+inheriting would make a large ML stack a hard runtime dependency of a
+numpy-only safety kernel. So `isinstance(shield, Robot)` is still `False`,
+and `GuardedUR5e` remains the isinstance-compatible path in this repository,
+where `lerobot` is a dependency already.
+
+The regression test that pinned the original defect was written to fail the
+day it was fixed, and it did, on the first run after the upstream change. It
+now asserts both halves of the new state rather than being deleted.
+
+### The historical entry, kept for the record
+
+It used to read: the upstream defect still exists, M-01 SENTINEL continues to
+ship a Shield that cannot be handed to `lerobot-record` on its own. Anyone using
 `sentinel` without `keystone` will hit it. It is recorded in
 [docs/decisions/task-4-shield-is-not-a-lerobot-plugin.md](docs/decisions/task-4-shield-is-not-a-lerobot-plugin.md)
 and belongs in M-01's own limitations.
