@@ -238,3 +238,51 @@ def wait_for_rtde(host: str, timeout_s: float = BOOT_TIMEOUT_S) -> tuple[bool, s
                 pass
         _time.sleep(3.0)
     return False, f"no RTDE session within {timeout_s:g}s after {attempts} attempts; last error: {last}"
+
+
+def power_on(host: str, timeout_s: float = BOOT_TIMEOUT_S) -> tuple[bool, str]:
+    """Power the simulated arm on and release its brakes.
+
+    URSim boots with the robot powered off. RTDE then connects and serves a
+    stream whose timestamp never advances, which is exactly the stalled
+    stream the kernel's staleness guard exists to catch. Measured on a
+    runner: 2000 consecutive getTimestamp() reads returned the same value.
+
+    So a connected RTDE session is still not a running robot. This drives
+    the dashboard the same way keystone.follower.UR5eFollower.connect does,
+    and reports the robot mode when it does not come up.
+    """
+    import time as _time
+
+    try:
+        import dashboard_client
+    except ImportError as exc:  # pragma: no cover
+        return False, f"dashboard_client is not importable: {exc}"
+
+    dash = dashboard_client.DashboardClient(host)
+    try:
+        dash.connect()
+        dash.powerOn()
+        dash.brakeRelease()
+    except Exception as exc:
+        return False, f"dashboard refused: {type(exc).__name__}: {exc}"
+
+    deadline = _time.monotonic() + timeout_s
+    last = "unknown"
+    while _time.monotonic() < deadline:
+        try:
+            last = dash.robotmode()
+        except Exception as exc:
+            last = f"robotmode failed: {exc}"
+        if "RUNNING" in str(last).upper():
+            try:
+                dash.disconnect()
+            except Exception:
+                pass
+            return True, f"robot mode {last}"
+        _time.sleep(2.0)
+    try:
+        dash.disconnect()
+    except Exception:
+        pass
+    return False, f"robot never reached RUNNING within {timeout_s:g}s; last mode: {last}"

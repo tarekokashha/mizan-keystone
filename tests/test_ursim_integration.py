@@ -31,6 +31,7 @@ from keystone.ursim import (
     pull_image,
     start_container,
     stop_container,
+    power_on,
     wait_for_rtde,
     wait_for_tcp,
 )
@@ -81,6 +82,15 @@ def ursim():
             pytest.fail(
                 f"URSim never served RTDE: {why}\nContainer logs:\n{container_logs()}")
         print(f"\nURSim ready: {why}")
+        # A connected RTDE session is still not a running robot. URSim boots
+        # powered off, and measured on a runner its timestamp then stood
+        # still across 2000 consecutive reads. That is precisely the stalled
+        # stream the kernel's staleness guard exists to catch, arriving here
+        # as a real controller state rather than a simulated one.
+        powered, mode = power_on(HOST, BOOT_TIMEOUT_S)
+        if not powered:
+            pytest.fail(f"URSim never powered on: {mode}\nContainer logs:\n{container_logs()}")
+        print(f"URSim powered: {mode}")
         yield handle
     finally:
         stop_container()
@@ -151,3 +161,54 @@ def test_the_controller_clock_advances_and_its_rate_is_reported(ursim):
         )
     finally:
         rtde.disconnect()
+
+
+def test_the_real_driver_reads_a_real_controller(ursim):
+    """The production path, end to end, for the first time.
+
+    Everything else in this repository drives UR5eFollower through the
+    deterministic fake. Here it constructs the genuine ur_rtde interfaces
+    from its own config and talks to a real UR controller: the same
+    connect(), the same get_observation(), the same getTimestamp() the
+    staleness fix introduced.
+
+    ip is overridden to the container because the declared config carries a
+    TEST-NET-1 documentation address, deliberately, so that this repository
+    never ships a routable robot address.
+    """
+    from keystone.config import UR5eConfig
+    from keystone.follower import UR5eFollower
+
+    cfg = UR5eConfig.declared().replace(ip=HOST)
+    robot = UR5eFollower(cfg)
+    robot.connect()
+    try:
+        assert robot.is_connected
+
+        first = robot.get_observation()
+        assert first["joint_position"].shape == (6,)
+        assert np.all(np.isfinite(first["joint_position"]))
+        assert np.all(np.isfinite(first["tcp_pose"]))
+
+        # The controller clock, through the driver, against real hardware
+        # simulation. This is the property the staleness fix turns on.
+        stamps = []
+        deadline = time.perf_counter() + 30.0
+        while len(stamps) < 200 and time.perf_counter() < deadline:
+            stamps.append(robot.get_observation()["timestamp_monotonic"])
+        arr = np.asarray(stamps, dtype=float)
+        advanced = np.diff(arr)
+        assert np.any(advanced > 0), (
+            "the driver's stamp never advanced against a running controller, "
+            f"so get_observation is not reading a live stream: {arr[:5]}")
+        assert np.all(advanced >= 0), (
+            f"the controller stamp went backwards, which the kernel treats as "
+            f"a driver fault: min delta {advanced.min()}")
+        print(
+            "\nUR5eFollower against URSim, measured and not asserted:"
+            f"\n  observations         : {len(stamps)}"
+            f"\n  controller dt p50 s  : {float(np.median(advanced[advanced > 0])):.6f}"
+            f"\n  stamp span s         : {float(arr[-1] - arr[0]):.6f}"
+        )
+    finally:
+        robot.disconnect()
